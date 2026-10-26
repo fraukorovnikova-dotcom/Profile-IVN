@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IVN</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="IVN">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#2f5d8a">
+<meta name="robots" content="noindex,nofollow">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#f5f6f8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#1c2230}
+#lock{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;padding-top:max(24px,env(safe-area-inset-top));padding-bottom:max(24px,env(safe-area-inset-bottom))}
+.box{width:100%;max-width:340px;text-align:center}
+.logo{width:76px;height:76px;border-radius:18px;margin:0 auto 18px;display:block}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:#5d6678;font-size:14px;margin:0 0 22px}
+input[type=password],input[type=text]{width:100%;font-size:18px;padding:14px;border:1px solid #cfd5de;border-radius:12px;background:#fff;color:#1c2230;text-align:center}
+button.go{width:100%;margin-top:12px;font-size:17px;font-weight:600;padding:14px;border:0;border-radius:12px;background:#2f5d8a;color:#fff}
+button.go:disabled{opacity:.6}
+label.rem{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px;font-size:14px;color:#5d6678}
+#err{color:#b3261e;font-size:14px;min-height:20px;margin-top:12px}
+#frame{position:fixed;inset:0;width:100%;height:100%;border:0;background:#f5f6f8;display:none;padding-top:env(safe-area-inset-top)}
+#pdf{position:fixed;inset:0;background:#2b2f36;display:none;flex-direction:column;z-index:10}
+#pdfbar{display:flex;align-items:center;gap:6px;padding:8px 10px;padding-top:max(8px,env(safe-area-inset-top));background:#1c2230;color:#fff}
+#pdfbar button{border:0;background:#3a4252;color:#fff;border-radius:9px;font-size:16px;min-width:42px;height:40px;padding:0 12px}
+#pdfbar .ttl{flex:1;font-size:13px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pdfscroll{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:8px 0;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+#pdfpages{margin:0 auto;width:max-content;min-width:100%}
+.pg{display:block;margin:0 auto 8px;background:#fff;position:relative}
+.pg canvas{display:block;width:100%;height:100%}
+#pdfmsg{color:#fff;text-align:center;padding:40px 20px;font-size:15px}
+</style>
+</head>
+<body>
+<div id="lock"><form class="box" id="form" autocomplete="off">
+<img class="logo" src="icons/icon-192.png" alt="">
+<h1>Медичний профіль</h1>
+<p class="sub">Введіть пароль / Введите пароль / Enter password</p>
+<input type="password" id="pw" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="••••••••" autofocus>
+<button class="go" id="go" type="submit">Увійти</button>
+<label class="rem"><input type="checkbox" id="rem" checked> Запам’ятати на цьому телефоні</label>
+<div id="err"></div>
+</form></div>
+<iframe id="frame" title="IVN"></iframe>
+<div id="pdf"><div id="pdfbar"><button id="pclose">✕</button><div class="ttl" id="ptitle"></div><button id="pminus">−</button><button id="pplus">+</button></div><div id="pdfscroll"><div id="pdfpages"></div></div></div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const b64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+let KEY=null, META=null;
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+if(navigator.storage&&navigator.storage.persist){ try{navigator.storage.persist();}catch(e){} }
+
+/* ---- key storage (non-extractable CryptoKey in IndexedDB, only if the user ticks "remember") ---- */
+function idb(){return new Promise((res,rej)=>{const r=indexedDB.open('ivn',1);r.onupgradeneeded=()=>r.result.createObjectStore('k');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+async function idbGet(){try{const d=await idb();return await new Promise((res,rej)=>{const q=d.transaction('k').objectStore('k').get('key');q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});}catch(e){return null;}}
+async function idbSet(k){try{const d=await idb();await new Promise((res,rej)=>{const t=d.transaction('k','readwrite');t.objectStore('k').put(k,'key');t.oncomplete=res;t.onerror=()=>rej(t.error);});}catch(e){}}
+async function idbDel(){try{const d=await idb();d.transaction('k','readwrite').objectStore('k').delete('key');}catch(e){}}
+
+async function getMeta(){ if(!META){ const r=await fetch('meta.json',{cache:'no-cache'}).catch(()=>fetch('meta.json')); META=await r.json(); } return META; }
+async function deriveKey(pw){
+  const m=await getMeta();
+  const base=await crypto.subtle.importKey('raw',new TextEncoder().encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:b64(m.salt),iterations:m.iter,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['decrypt']);
+}
+async function decryptBuf(buf){ const u=new Uint8Array(buf); return crypto.subtle.decrypt({name:'AES-GCM',iv:u.slice(0,12)},KEY,u.slice(12)); }
+async function fetchBuf(url){ const r=await fetch(url); if(!r.ok) throw new Error(url+' '+r.status); return r.arrayBuffer(); }
+
+async function openApp(){
+  const buf=await fetchBuf('app.enc');
+  const html=new TextDecoder().decode(await decryptBuf(buf));
+  const f=$('frame'); f.srcdoc=html; f.style.display='block'; $('lock').style.display='none';
+}
+async function tryUnlock(key){
+  KEY=key; await openApp();
+}
+$('form').addEventListener('submit',async e=>{
+  e.preventDefault(); const pw=$('pw').value; if(!pw) return;
+  $('go').disabled=true; $('err').textContent='';
+  try{
+    const k=await deriveKey(pw);
+    await tryUnlock(k);
+    if($('rem').checked) await idbSet(k); else await idbDel();
+    $('pw').value='';
+  }catch(err){
+    KEY=null; $('err').textContent = (err&&err.name==='OperationError') ? 'Невірний пароль' : 'Не вдалося відкрити (перевірте інтернет при першому вході)';
+  }
+  $('go').disabled=false;
+});
+(async()=>{ const k=await idbGet(); if(k){ try{ await tryUnlock(k);}catch(e){ await idbDel(); } } })();
+
+/* ---- messages from the app (inside iframe) ---- */
+window.addEventListener('message',e=>{
+  const d=e.data||{};
+  if(d.ivn==='pdf') openPdf(d.key,d.page||1,d.title||'');
+  if(d.ivn==='lock'){ idbDel(); location.reload(); }
+});
+
+/* ---- PDF viewer (pdf.js, decrypted in memory) ---- */
+let pdfjs=null, curDoc=null, zoom=1, curKey=null, curPage=1, io=null;
+async function loadPdfjs(){ if(!pdfjs){ pdfjs=await import('./pdfjs/pdf.min.mjs'); pdfjs.GlobalWorkerOptions.workerSrc=new URL('./pdfjs/pdf.worker.min.mjs',location.href).href; } return pdfjs; }
+function layout(){
+  const wrap=$('pdfpages'), sc=$('pdfscroll'); wrap.innerHTML='';
+  if(io) io.disconnect();
+  const W=Math.floor((sc.clientWidth-8)*zoom);
+  io=new IntersectionObserver(es=>{es.forEach(en=>{ if(en.isIntersecting) renderPage(en.target); });},{root:sc,rootMargin:'600px 0px'});
+  curDoc.pages.forEach((p,i)=>{
+    const div=document.createElement('div'); div.className='pg'; div.dataset.n=i+1;
+    const h=Math.round(W*p.h/p.w); div.style.width=W+'px'; div.style.height=h+'px'; wrap.appendChild(div); io.observe(div);
+  });
+  const t=wrap.children[curPage-1]; if(t) sc.scrollTop=t.offsetTop-8;
+}
+async function renderPage(div){
+  if(div.dataset.done) return; div.dataset.done='1';
+  const n=+div.dataset.n, page=await curDoc.doc.getPage(n);
+  const W=div.clientWidth, base=page.getViewport({scale:1}), dpr=Math.min(window.devicePixelRatio||1,2.5);
+  const vp=page.getViewport({scale:W/base.width*dpr});
+  const c=document.createElement('canvas'); c.width=Math.floor(vp.width); c.height=Math.floor(vp.height);
+  div.appendChild(c);
+  try{ await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise; }catch(e){}
+}
+async function openPdf(key,page,title){
+  $('pdf').style.display='flex'; $('ptitle').textContent=title||key; $('pdfpages').innerHTML='<div id="pdfmsg">Завантаження…</div>';
+  try{
+    const lib=await loadPdfjs();
+    const data=await decryptBuf(await fetchBuf('docs/'+key+'.bin'));
+    const doc=await lib.getDocument({data:new Uint8Array(data)}).promise;
+    const pages=[]; for(let i=1;i<=doc.numPages;i++){ const p=await doc.getPage(i), v=p.getViewport({scale:1}); pages.push({w:v.width,h:v.height}); }
+    if(curDoc&&curDoc.doc) try{curDoc.doc.destroy();}catch(e){}
+    curDoc={doc,pages}; curKey=key; curPage=Math.min(Math.max(1,page),doc.numPages); zoom=1;
+    $('ptitle').textContent=(title||key)+' · '+doc.numPages+' ст.';
+    layout();
+  }catch(err){ $('pdfpages').innerHTML='<div id="pdfmsg">Не вдалося відкрити бланк.<br>'+String(err&&err.message||err)+'</div>'; }
+}
+$('pclose').onclick=()=>{ $('pdf').style.display='none'; $('pdfpages').innerHTML=''; if(curDoc&&curDoc.doc){try{curDoc.doc.destroy();}catch(e){} curDoc=null;} };
+function rez(f){ if(!curDoc) return; const sc=$('pdfscroll'); const ratio=sc.scrollTop/Math.max(1,sc.scrollHeight); zoom=Math.min(4,Math.max(.6,zoom*f)); layout(); sc.scrollTop=ratio*sc.scrollHeight; }
+$('pplus').onclick=()=>rez(1.3); $('pminus').onclick=()=>rez(1/1.3);
+</script>
+</body>
+</html>
